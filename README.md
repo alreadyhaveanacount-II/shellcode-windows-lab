@@ -1,2 +1,1 @@
-# shellcode-windows-lab
-A collection of x64 Assembly snippets focused on Position-Independent Code (PIC) and Windows Internals. Manual PEB/EAT traversal and dynamic API resolution without external dependencies
+This repository is a personal collection of Position-Independent Code (PIC) snippets written in x64 Assembly (NASM). The goal is to explore Windows Internals by interacting directly with system structures in memory, bypassing the standard Import Address Table (IAT).
