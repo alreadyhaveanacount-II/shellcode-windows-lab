@@ -1,0 +1,1 @@
+Locates kernel32.dll, then searches for and executes the function "ExitProcess" dynamically.
