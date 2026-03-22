@@ -1,0 +1,4 @@
+This code is a Position-Independent (PIC) Reflective Loader written in x64 Assembly.
+It locates the kernel32.dll base address by traversing the Process Environment Block (PEB) and the InLoadOrderModuleList
+Then It manually parses the Export Address Table (EAT) of kernel32.dll to find the memory addresses of ExitProcess, LoadLibraryA, and GetProcAddress
+Finally It uses the resolved LoadLibraryA to pull user32.dll into memory and GetProcAddress to find MessageBoxA and show a "Hello World!" message
