@@ -4,12 +4,6 @@ default rel
 segment .text:
     global _start
 
-segment .data:
-    user32_str db "user32.dll", 0
-    msgbox_str db "MessageBoxA", 0
-    mainmsg db "Hello World!", 0
-    msgcaption db "This is awesome", 0
-
 PEB_TEB_OFFSET equ 0x60
 PEB_LDR_OFFSET equ 0x18
 LOAD_LIST_OFFSET equ 0x10
@@ -105,30 +99,63 @@ found_kernel32:
     mov r13, r8 ; stores the GetProc function
 
 msg_box:
-    ; Loading user32.dll
-    sub rsp, 32            
-    lea rcx, [user32_str]  
-    call r14               
-    add rsp, 32
+    ; now only r13 to r15 are actually useful, everything else can be reused
+
+    ; Mounting user32.dll on the stack
+    mov rax, 0x0000000000006C6C
+    push rax
+    mov rax, 0x642E323372657375
+    push rax
+
+    ; Now rcx points to user32.dll
+    lea rcx, [rsp]
+    sub rsp, 32 ; Reserving shadow space
+    call r14 ; Calling LoadLibraryA
+    add rsp, 32 + 16
     
     ; Saves the handle of user32.dll in r12 (non-volatile)
     mov r12, rax
 
+    ; Mounting MessageBoxA on the stack
+    mov rax, 0x000000000041786F ; oxA\0
+    push rax
+    mov rax, 0x426567617373654D ; MessageB
+    push rax
+
     ; Gets the address of MessageBoxA in user32.dll
+    lea rdx, [rsp]
     sub rsp, 32
-    mov rcx, r12          
-    lea rdx, [msgbox_str] 
+    mov rcx, r12
     call r13               
-    add rsp, 32
+    add rsp, 32 + 16
+
+    ; Saving the handle to MessageBoxA in r12
+    mov r12, rax
+
+    ; Mounting "Hello World!" on the stack
+    mov rax, 0x0000000021646C72 ; rld!\0
+    push rax
+    mov rax, 0x6F57206F6C6C6548 ; Hello Wo
+    push rax
+
+    ; Storing the main message in rdx
+    lea rdx, [rsp]
+
+    ; Mounting "This is awesome" on the stack
+    mov rax, 0x00656D6F73657761
+    push rax
+    mov rax, 0x2073692073696854
+    push rax
+
+    ; Storing the title in r8
+    lea r8, [rsp]
 
     ; Actually showing the message
     sub rsp, 32
     xor rcx, rcx           ; Null handle
-    lea rdx, [mainmsg]     ; Main message
-    lea r8, [msgcaption]   ; Box title
     xor r9, r9             ; uType - 0 for default
-    call rax              ; Calls MessageBoxA
-    add rsp, 32
+    call r12              ; Calls MessageBoxA
+    add rsp, 64
 
     ; Finishing the program
     and rsp, -16
