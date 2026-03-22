@@ -1,1 +1,3 @@
-Locates kernel32.dll, then searches for and executes the function "ExitProcess" dynamically.
+This code is an extremely simple Position-Independent (PIC) Reflective Loader written in x64 Assembly.
+It only locates kernel32.dll, then searches for and executes the function "ExitProcess" dynamically.
+My first experience with PIC programming in assembly.
