@@ -1,0 +1,6 @@
+This code is a Position-Independent (PIC) Reflective Loader written in x64 Assembly.
+It locates ntdll.dll base address by traversing the Process Environment Block (PEB) and the InLoadOrderModuleList
+Then It manually parses the Export Address Table (EAT) of ntdll.dll to find the memory addresses of NtAllocateVirtualMemory, NtFreeVirtualMemory, NtProtectVirtualMemory and NtFlushInstructionCache
+It then uses an auxiliary function to extract the SSNs directly from the functions and use them for direct syscalls, similar to HellsGate.
+The code also uses a simple self-made ChaCha20 implementation to decrypt the shellcode before loading it in memory and executing it from there.
+The shellcode itself is the same used in the hello-world project.
